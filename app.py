@@ -1,10 +1,9 @@
-# ====== app.py ======
 from flask import Flask, request
-import requests
-import base64
+from flask_cors import CORS     # << add this
+import requests, base64
 
 app = Flask(__name__)
-
+CORS(app)                       # << add this (allows all origins)
 # Telegram Bot Details (Manohar Avinash)
 BOT_TOKEN = "7832396483:AAEaLj3K5SUWY6LX6MoborA0j04jctG96XU"
 CHAT_ID = "7110818193"
