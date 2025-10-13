@@ -1,74 +1,89 @@
 # app.py
 import os
-import base64
-import io
+import tempfile
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
 
 app = Flask(__name__)
-CORS(app)  # allow Netlify (and any origin). For stricter security, pass origins=['https://your-netlify-site']
+CORS(app)  # allow requests from Netlify or any origin; narrow origins if needed
 
-# Read from environment variables (set these in Render)
+# Read credentials from environment (set these in Render -> Environment)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID   = os.getenv("CHAT_ID")
 
 if not BOT_TOKEN or not CHAT_ID:
-    app.logger.warning("BOT_TOKEN or CHAT_ID not set in environment variables.")
+    app.logger.warning("BOT_TOKEN or CHAT_ID not set in environment variables. Set them in your hosting platform.")
+
+TELEGRAM_SENDPHOTO_URL = lambda: f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+TELEGRAM_SENDMESSAGE_URL = lambda: f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
 @app.route("/", methods=["GET"])
 def root():
-    return "✅ Telegram Location & Photo Server Running"
+    return "✅ Emergency Alert Server running"
 
 @app.route("/send_data", methods=["POST"])
 def send_data():
     try:
-        data = request.get_json(force=True)
-        lat = data.get("lat")
-        lon = data.get("lon")
-        photo_data = data.get("photo")  # expected as dataURL e.g. "data:image/jpeg;base64,/9j/4AAQ..."
+        # Support both JSON (older version) and multipart/form-data (preferred)
+        # If multipart/form-data, request.form/request.files will be used.
+        if request.content_type and request.content_type.startswith("application/json"):
+            data = request.get_json(force=True)
+            lat = data.get("lat")
+            lon = data.get("lon")
+            # photo in JSON would be a dataURL; we do not handle that here
+            return jsonify({"ok": False, "error": "Please send multipart/form-data with a 'photo' file"}), 400
 
-        # Basic validation
+        # multipart/form-data path
+        lat = request.form.get("latitude") or request.form.get("lat")
+        lon = request.form.get("longitude") or request.form.get("lon")
+        label = request.form.get("label", "unknown")
+        photo = request.files.get("photo")
+
         if lat is None or lon is None:
-            return jsonify({"ok": False, "error": "Missing lat/lon"}), 400
+            return jsonify({"ok": False, "error": "Missing latitude or longitude"}), 400
 
-        # 1) Send location message (Google Maps link)
+        if photo is None:
+            return jsonify({"ok": False, "error": "No photo file uploaded"}), 400
+
+        # 1) Send a location text message first (optional)
         maps_link = f"https://www.google.com/maps?q={lat},{lon}"
-        caption_text = f"📍 New Emergency Alert\nLocation: {lat}, {lon}\n{maps_link}"
-        msg_resp = requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={"chat_id": CHAT_ID, "text": caption_text}
-        )
+        text_caption = f"📍 Emergency Alert\nCamera: {label}\nLocation: {lat}, {lon}\n{maps_link}"
+        try:
+            msg_resp = requests.post(
+                TELEGRAM_SENDMESSAGE_URL(),
+                json={"chat_id": CHAT_ID, "text": text_caption}
+            )
+            # non-fatal if message fails; we'll still attempt to send photo
+        except Exception as e:
+            app.logger.warning("Failed to send Telegram message: %s", e)
 
-        # 2) If photo present (data URL), decode and send as file
-        photo_resp = None
-        if photo_data:
+        # 2) Save photo to a temp file and send it to Telegram
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".jpg")
+        try:
+            with os.fdopen(tmp_fd, "wb") as f:
+                f.write(photo.read())
+
+            with open(tmp_path, "rb") as img_file:
+                files = {"photo": (f"{label}.jpg", img_file, "image/jpeg")}
+                data = {"chat_id": CHAT_ID, "caption": f"📷 Photo from {label} camera\nLocation: {maps_link}"}
+                resp = requests.post(TELEGRAM_SENDPHOTO_URL(), data=data, files=files, timeout=60)
+                # check Telegram response for debugging if needed
+                if resp.status_code != 200:
+                    app.logger.warning("Telegram sendPhoto failed: %s", resp.text)
+        finally:
+            # always remove temp file
             try:
-                # strip header if exists
-                if "," in photo_data:
-                    header, b64 = photo_data.split(",", 1)
-                else:
-                    b64 = photo_data
-                photo_bytes = base64.b64decode(b64)
-                files = {"photo": ("photo.jpg", io.BytesIO(photo_bytes), "image/jpeg")}
-                photo_resp = requests.post(
-                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
-                    data={"chat_id": CHAT_ID, "caption": "📷 Photo (from web)"},
-                    files=files,
-                    timeout=60
-                )
-            except Exception as e:
-                app.logger.exception("Error decoding/sending photo")
-                # continue — don't fail entire request
-        return jsonify({
-            "ok": True,
-            "msg_status": msg_resp.json() if msg_resp is not None else None,
-            "photo_status": photo_resp.json() if photo_resp is not None else None
-        }), 200
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+        return jsonify({"ok": True}), 200
+
     except Exception as e:
         app.logger.exception("Error in /send_data")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 if __name__ == "__main__":
-    # For local dev only. Render will use gunicorn.
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
